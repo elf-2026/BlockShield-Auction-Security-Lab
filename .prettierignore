@@ -1,0 +1,15 @@
+# dist/ and node_modules/ are handled by .gitignore, but list for clarity
+dist
+node_modules
+coverage
+audit-artifacts
+# Foundry output + vendored deps (forge-std) — never format
+out
+cache
+lib
+broadcast
+# Lockfiles and generated ABI (machine-formatted by scripts/sync-abi.sh)
+package-lock.json
+src/CommitRevealAuction.json
+# Generated docs/artifacts
+*.lock

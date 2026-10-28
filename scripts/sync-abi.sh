@@ -25,7 +25,10 @@ generate() {
             console.error("ERROR: forge artifact is missing abi or bytecode.object");
             process.exit(1);
         }
-        const out = { abi: artifact.abi, bytecode: artifact.bytecode };
+        // Drop sourceMap: debug metadata changes between builds even when the
+        // deployed object is identical, which would make --check report stale.
+        const { object, linkReferences } = artifact.bytecode;
+        const out = { abi: artifact.abi, bytecode: { object, linkReferences } };
         process.stdout.write(JSON.stringify(out, null, 2) + "\n");
     ' "$ARTIFACT"
 }

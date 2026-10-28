@@ -1,17 +1,29 @@
 import { useSyncExternalStore } from 'react'
+import type { Address, Hash } from 'viem'
 
 export interface AuctionStateValues {
-  account: string | undefined
+  account: Address | undefined
   connected: boolean
   networkId: number | undefined
-  state: number
-  minBid: bigint
+  /** null = RPC unreachable / not yet checked */
+  chainOk: boolean | null
+  /** null = not yet checked */
+  hasCode: boolean | null
+  phase: number
+  commitDeadline: bigint
   revealDeadline: bigint
+  seller: Address | undefined
+  settled: boolean
+  canceled: boolean
   highestBid: bigint
-  highestBidder: string
-  bidderDeposit: bigint
-  auctionIdCounter: bigint
-  seller: string | undefined
+  highestBidder: Address
+  totalDeposits: bigint
+  sellerProceeds: bigint
+  myCommitment: Hash | null
+  myDeposit: bigint
+  myRevealed: boolean
+  myWithdrawable: bigint
+  readError: string | undefined
 }
 
 export interface AuctionStore extends AuctionStateValues {
@@ -23,14 +35,23 @@ const defaults: AuctionStateValues = {
   account: undefined,
   connected: false,
   networkId: undefined,
-  state: 0, // AuctionState.Created
-  minBid: 0n,
+  chainOk: null,
+  hasCode: null,
+  phase: 0,
+  commitDeadline: 0n,
   revealDeadline: 0n,
+  seller: undefined,
+  settled: false,
+  canceled: false,
   highestBid: 0n,
   highestBidder: '0x0000000000000000000000000000000000000000',
-  bidderDeposit: 0n,
-  auctionIdCounter: 1n,
-  seller: undefined,
+  totalDeposits: 0n,
+  sellerProceeds: 0n,
+  myCommitment: null,
+  myDeposit: 0n,
+  myRevealed: false,
+  myWithdrawable: 0n,
+  readError: undefined,
 }
 
 const listeners = new Set<() => void>()

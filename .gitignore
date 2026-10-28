@@ -14,13 +14,15 @@ dist/
 anvil.log
 *.anvil.log
 
+# Browser audit output (screenshots etc.)
+audit-artifacts/
+
 # OS
 .DS_Store
 
-# Ignores development broadcast logs
-!/broadcast
-/broadcast/*/31337/
-/broadcast/**/dry-run/
+# Ignores development broadcast logs (whole tree — dev.sh and the lab target
+# only ever write chain-31337 artifacts here; nothing should be committed)
+broadcast/
 
 # Docs
 docs/

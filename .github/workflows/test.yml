@@ -8,8 +8,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  check:
-    name: Foundry project
+  foundry:
+    name: Foundry (fmt, build, tests)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -33,3 +33,47 @@ jobs:
 
       - name: Run Forge tests
         run: forge test -vvv
+
+  frontend:
+    name: Frontend (typecheck, lint, tests, build)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@49933ea5288ca861fafe5771c0a9e68f8b1f47fd # v4.1.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build contracts and verify ABI sync
+        run: |
+          forge build
+          npm run sync-abi
+          npm run sync-abi:check
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Format check
+        run: npm run format:check
+
+      - name: Frontend unit tests
+        run: npm run test:frontend
+
+      - name: Production build
+        run: npm run build

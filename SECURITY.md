@@ -1,98 +1,225 @@
-# BlockShield: Security Considerations
+# BlockShield — Security Model (V2 contract)
 
-This document outlines the security assumptions, limitations, and residual risks of the BlockShield commit-reveal auction protocol.
+**Scope & disclaimer.** This repository is a **local Anvil security lab**
+(chain id 31337, unlocked dev accounts) demonstrating commit–reveal auction
+mechanics and their failure modes. It is **not a production-ready mainnet
+auction** and has **no external audit**. Fund it only with local test ETH.
 
-## Security Model
+The contract under review is `src/CommitRevealAuction.sol` (V2):
+single auction per deployment, two fixed timestamp deadlines, pull-based
+withdrawals. Every claim below is backed by a named test in
+`test/CommitRevealAuction.t.sol` (44 tests) and, where it crosses the
+client boundary, by frontend/integration suites cited at the end.
 
-The BlockShield protocol uses a commit-reveal scheme to limit early bid disclosure while maintaining deterministic winner selection and secure fund accounting. The following security invariants are enforced:
+---
 
-### Measurable Security Invariants
+## 1. Design summary
 
-1. **Solvency**: `contract.balance >= totalOutstandingDeposits` at all times. The contract's ETH balance must always cover all refundable deposits.
+```
+constructor(commitDuration, revealDuration)   // each ≥ MIN_PHASE_DURATION = 60s
+commitDeadline  = block.timestamp + commitDuration   (immutable)
+revealDeadline  = commitDeadline  + revealDuration   (immutable)
 
-2. **Commitment Integrity**: A bid can only be revealed if the revealed `(bidAmount, nonce)` pair produces a commitment hash that matches the originally committed hash. Any alteration changes the hash and causes the reveal to revert.
+phase()  // DERIVED from block.timestamp; nothing stored can desync
+  PHASE_COMMIT  0: ts <  commitDeadline   commit(bytes32) · refund() · cancel()
+  PHASE_REVEAL  1: ts <  revealDeadline   reveal(bidAmount, nonce)
+  PHASE_SETTLE  2: ts ≥  revealDeadline   settle()   (no ETH moves)
+  PHASE_ENDED   3: settled || canceled    withdraw() (pull payments)
+```
 
-3. **Single-Reveal**: Each commitment can only be successfully revealed once. The `revealed` flag is set to `true` after the first successful reveal; second reveal attempts revert.
+Commitment hash (public helper `computeCommitmentHash`):
 
-4. **Timeliness**: `settle()` reverts if `block.number < revealDeadline`. Settlement cannot occur before the required deadline.
+```solidity
+keccak256(abi.encodePacked(
+    keccak256("BlockShield.CommitReveal.V2"),  // domain tag
+    block.chainid, address(this),              // replay binding
+    bidder, bidAmount, nonce                   // bid binding
+))
+```
 
-5. **Uniqueness**: Exactly one `BidRevealed` event is emitted per valid bidder reveal. Duplicate reveals are prevented by the `revealed` flag.
+## 2. Accounting invariants (the core guarantees)
 
-6. **No Cross-Audience Replay**: `commitmentHash(auctionId1, ...) != commitmentHash(auctionId2, ...)` for `auctionId1 != auctionId2`. Cross-auction replay is prevented by embedding the auction ID in the commitment hash.
+| #      | Invariant                                                                                                                                                                                                                                                           | Enforced by                                                                                                                                                       | Tested by                                                                                                                                                            |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **I1** | **Solvency** — `address(this).balance ≥ totalDeposits` always. Excess ETH (self-destruct / forced `coinbase`-style transfers) is _unclaimable_, never paid out.                                                                                                     | `commit` is the only fund inflow; `refund`/`withdraw` are the only outflows and decrement `totalDeposits` atomically; no function pays more than the ledger says. | `test_ForcedEthNeverWithdrawable`, `test_FailedWithdrawPreservesClaimForRetry`                                                                                       |
+| **I2** | **Ledger** — while active, `totalDeposits == Σ bidderDeposits`. Escrow is created/consumed only inside `commit`/`refund` together with the commitment record.                                                                                                       | single write path per mapping                                                                                                                                     | `test_CommitEscrowsValueAndStoresHash`, `test_RefundClearsCommitmentAndAccounting`, `test_SettleFullSettlementWinnerLosersForfeits`                                  |
+| **I3** | **Claims** — after `settle()` or `cancel()`, `totalDeposits == Σ withdrawable(a)` over affected parties: winner escrow (== bid) + forfeited unrevealed escrow are re-attributed to `sellerProceeds`, losers keep their escrow as claims, so no wei is double-owned. | settlement is pure bookkeeping; `_escrowClaim()` and `withdrawable()` mirror each other and consume disjoint buckets                                              | `test_PartialWithdrawalsPreserveInvariants`, `test_SellerAndBiddersInvariantLifecycle`, `test_SellerIsLoserDualWithdrawal`, `test_SellerWinsOwnAuctionNoDoubleCount` |
 
-7. **Bidder Fund Isolation**: A bidder cannot withdraw another bidder's funds. Refunds and withdrawals are only allowed for the caller's own deposited amount.
+**Every wei has exactly one claimant at all times.** The seller-as-bidder
+duality (escrow bucket + proceeds bucket in one `withdraw()`) is explicitly
+covered: `test_SellerIsLoserDualWithdrawal`, `test_SellerWinsOwnAuctionNoDoubleCount`.
 
-8. **Failed Transfer Resilience**: Failed external calls do not silently corrupt accounting. All `settle()` and `refund()` operations check transfer return status and revert on failure.
+## 3. Fund-flow guarantees
 
-### Attack Classes and Protocol Defenses
+### Pull-based withdrawals (no push, no blockage)
 
-| Attack Class | Protocol Defense | Residual Risk |
-|-------------| ---------------- | ------------ |
-| **Copied commitments / replay** | Nonce per bidder per auction + domain separator (chainId + contract address + auctionId in commitment hash); only first valid reveal accepted | **Residual**: Reveal front-running still possible - observer sees commitment hash, races to reveal first with same bid. Mitigation: users should reveal promptly after committing. |
-| **Modified / malformed reveals** | Reveal verification: commitmentHash must exactly match stored hash; deterministic hash verification | None - hash verification is deterministic. |
-| **Duplicate reveals** | `Commitment.revealed` flag set to `true` after first successful reveal; second `reveal()` reverts | None. |
-| **Premature phase transitions** | State gate on every function (`onlyState` modifier), `revealDeadline` checked via `block.number` | None if gate logic correct. |
-| **Reentrancy through malicious recipient** | `nonReentrant` modifier on `settle()`; winner payment executed AFTER state update; all external ETH transfers check return status. Winner cannot re-enter before balance change. | **Residual**: If winner is a contract that receives ETH and the transfer succeeds, the winner's code executes post-payment. The `nonReentrant` guard prevents re-entering `settle()`, but the winner can still execute arbitrary logic with received funds. This is a known limitation - the protocol prevents re-entrancy into contract state changes, but cannot control what the winner does with received funds. |
-| **Double withdrawals / incorrect refunds** | Per-bidder withdrawal tracking; refund amounts calculated from on-chain state, not user-supplied values; `revealed` flag prevents double-reveal | **Residual**: If a bidder calls `refund()` twice before state updates, both could succeed before `revealed` is set. Mitigation: `revealed` flag set before transfer. |
-| **Insolvent accounting** | Solvency invariant `B >= Σ D[b]` enforced at every state change; `settle()` reverts if insufficient balance; `transfer` return status checked | **Residual**: If ETH is sent to the contract between invariant check and transfer, balance could drop. Mitigation: `settle()` runs as a single atomic transaction; no intermediate state changes. |
-| **Timestamp / integer edge cases** | `revealDeadline` checked against `block.timestamp` (not timestamp, which can be manipulated by miners); Solidity ^0.8+ provides automatic integer checking; `highestBid` tracked on-chain | **Residual**: `block.timestamp` can be manipulated by up to ~2 seconds by honest validators, and more by malicious miners. Mitigation: use reliable oracle for critical deadlines (out of scope for this demo). |
-| **Unrevealed bids / settlement liveness** | `settle()` callable by anyone after `revealDeadline`; if no one calls, auction stays in `Reveal` state but deposits remain secure; unrevealed deposits refunded after 30-day timelock | **Residual**: If no one calls `settle()` for an extended period, capital is inefficient but **safe**. The protocol cannot force liveness; community coordination required. |
-| **Malicious contract recipients** | Winner payment uses `transfer{value: W}(seller)` - ETH sent to seller (EOA typically). If winner is a contract, fallback receives ETH but cannot re-enter `settle()` due to `nonReentrant`. Transfer return status checked. | **Residual**: If winner is a contract with a `fallback()` that calls `settle()` again, the second call reverts via `nonReentrant`. **However**, the winner contract now holds ETH and can do whatever its code intends. This is a mitigated risk, not fully preventable. |
-| **Transaction ordering / MEV** | Commit-reveal provides some privacy, but reveal order is visible on-chain; domain separator raises cost of targeted front-running; reveal order determines tie-breaking | **Residual**: Reveal front-running is still possible. The commit scheme prevents bid front-running before commitment, but the reveal order itself is orderable by miners/validators. This is a residual MEV risk that commit-reveal partially addresses but cannot fully eliminate. |
-| **Unsafe administrative privileges** | No admin key; all rules baked into code; `onlyState` modifiers; `cancelAuction()` only before `revealDeadline`; no emergent privileges | **Residual**: If the creator private key is compromised, the attacker can cancel the auction or manipulate parameters within allowed bounds. Mitigation: use a multi-sig creator account; no emergency admin upgrades. |
+`settle()` and `cancel()` **perform no external calls and send no ETH**;
+payouts happen only when the claimant calls `withdraw()` for their own
+account. Consequences:
 
-### Security Assumptions
+- A recipient with a reverting fallback (contracts without `receive()`), or a
+  malicious actor, can **never stall settlement or drain anyone else's funds** —
+  they can only delay collecting _their own_ claim.
+- Failed transfers revert the whole `withdraw()`; the claim survives intact
+  for retry (`test_FailedWithdrawPreservesClaimForRetry`).
+- Contrast with push-payment designs where one poisoned recipient blocks the
+  loop: settlement is O(1) and never loops over bidders
+  (`test_SettleFullSettlementWinnerLosersForfeits`).
 
-The following assumptions underpin the security of the BlockShield protocol:
+### Refunds & forfeiture
 
-1. **Honest majority of validators**: The blockchain's consensus mechanism ensures that block timestamps and block numbers are largely accurate, with bounded manipulation possible.
+- **Losers** (revealed, not highest) receive their full escrow via `withdraw()`
+  after settlement.
+- **Unrevealed commitments forfeit**: `settle()` moves their escrow into
+  `sellerProceeds`; `withdrawable()` returns 0 for them. This is the economic
+  cost of not revealing — griefing is impossible beyond losing your own escrow,
+  because forfeits can only exceed what the forfeiter deposited.
+- **Zero-reveal settlement is a full unwind**: if `highestBid == 0` nobody
+  forfeits and every escrow stays claimable
+  (`test_ZeroRevealSettlement`, `test_CancelWithoutBids`).
+- **Early exit**: during the commit phase a bidder may `refund()` (clears
+  commitment + escrow atomically); duplicate commitments are rejected
+  (`"Active commitment exists"`) so a refund is required first
+  (`test_CommitRejectsDuplicateCommitment`, `test_ReCommitAfterRefundSucceeds`,
+  `test_RevealAfterRefundReverts`).
+- **Cancel** is seller-only and commit-phase-only; afterwards all escrow is
+  withdrawable (`test_CancelSellerOnly`, `test_CancelRevertsInRevealPhase`,
+  `test_CancelWithCommitmentsAllowsFullWithdrawals`).
 
-2. **Cryptographically secure nonce generation**: Client-side nonce generation using `crypto.getRandomValues` (or equivalent) is cryptographically secure and unpredictable to attackers.
+## 4. Commitment scheme — what it binds, and what it does **not** hide
 
-3. **Commitment hash collision resistance**: `keccak256` with the specified encoding scheme provides sufficient collision resistance for the commitment scheme.
+**Bound (tested):**
 
-4. **User-controlled secrets**: Users securely store and protect their commit secrets (bid amount + nonce). Loss of these secrets means loss of the bid.
+- Wrong `bidAmount` or wrong `nonce` fails the hash
+  (`test_RevealRejectsWrongNonce`, `test_RevealRejectsWrongAmount`).
+- Revealing without a commitment, or double-revealing, reverts
+  (`test_RevealWithoutCommitmentReverts`, `test_DoubleRevealReverts`).
+- **Replay protection**: the hash embeds `block.chainid` and
+  `address(this)` — a commitment cannot be replayed on another chain or
+  another deployment, and (by construction) only `msg.sender` can reveal it
+  since `computeCommitmentHash(msg.sender, …)` is checked
+  (`test_HashBindsChainAndContract`, `test_HashMatchesInlineConstruction`).
+- **Escrow == bid**: reveal enforces `bidAmount == bidderDeposits`, so escrow
+  can never be underfunded relative to the winning claim
+  (`test_RevealRequiresEscrowToEqualBid`).
 
-5. **No backdoor in RNG**: The random number generator used for nonce generation is not backdoored or predictable.
+**Not hidden — the central honesty note of this design:**
 
-### Known Risks and Limitations
+- Because escrow must equal the revealed bid, **the bid amount is visible
+  on-chain from the moment `commit` is mined** (as `msg.value`). What the
+  commitment hides until reveal is _nothing about the amount_ — its role here
+  is binding (no renegotiation), identity (only the owner with the nonce can
+  reveal), and replay isolation. Classic sealed-bid privacy would require
+  decoupling escrow from the bid (e.g. a fixed deposit + separate settlement
+  charge); the V2 design deliberately trades that away for the simple,
+  auditable solvency invariant `totalDeposits == Σ escrow == Σ claims`.
+- A hidden-hash preimage attack would need `keccak256` preimage recovery on a
+  128-bit CSPRNG nonce; a low-entropy nonce (user-typed) **does** leak the
+  amount — hence enforced client-side: nonces come from
+  `crypto.getRandomValues` (`src/utils/commitment.ts::generateNonce`,
+  tested in `src/utils/commitment.test.ts`), never `Math.random`.
+- Reveal order remains visible; the tie-break
+  (_higher bid → earlier reveal → lower address_,
+  `test_TieBreakEarliestRevealWins`,
+  `test_TieBreakSameTimestampLowerAddressWins`) is deterministic but
+  block-producers can still influence ordering within their block (see §6).
 
-#### Inevitability of Some Risks
+## 5. EVM-level hardening
 
-The following risks are acknowledged as inherent to the commit-reveal auction design and cannot be fully eliminated:
+| Concern                     | Implementation                                                                                                                                                                                        | Test                                                                                                                                         |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Reentrancy on ETH transfers | hand-rolled `nonReentrant` (single storage slot, `=2`/`=1` around body) on the only two functions that transfer (`refund`, `withdraw`); commit/reveal/settle/cancel make **no external calls at all** | `test_RefundReentrancyBlocked`, `test_WithdrawReentrancyPaysOnce`                                                                            |
+| Check-Effects-Interactions  | all bucket decrements (`bidderDeposits`, `sellerProceeds`, `totalDeposits`) happen _before_ the `.call{value}`                                                                                        | `test_FailedWithdrawPreservesClaimForRetry`                                                                                                  |
+| Timestamp dependence        | deadlines are `block.timestamp` comparisons; `phase()` derived, half-open intervals (`ts < commitDeadline` = commit) — no stored phase to desync                                                      | `test_PhaseTransitions`, `test_CommitAllowedUntilCommitDeadline`, `test_CommitRevertsAtCommitDeadline`, `test_RevealRevertsAtRevealDeadline` |
+| Integer overflow            | Solidity ^0.8.26 checked arithmetic everywhere                                                                                                                                                        | —                                                                                                                                            |
+| Short phases                | constructor requires each duration ≥ 60 s                                                                                                                                                             | `test_ConstructorRejectsShortPhases`                                                                                                         |
+| Empty commits               | zero value or zero hash rejected                                                                                                                                                                      | `test_CommitRejectsZeroValue`, `test_CommitRejectsZeroHash`                                                                                  |
 
-1. **Reveal front-running**: The commit-reveal scheme prevents bid front-running (bidders cannot see others' bids before committing), but reveal order is still visible on-chain. Miners/validators can order reveals to their advantage.
+## 6. Known limitations & residual risks (by design, not by oversight)
 
-2. **Winner control after payment**: Once the winner's deposit is transferred, the winner has full control over the received ETH. The protocol cannot prevent the winner from doing whatever they want with the funds.
+1. **Amounts are public** (§4): commit–reveal here provides binding + replay
+   protection, not sealed-bid price privacy. Documented trade-off for
+   auditability of I1–I3.
+2. **`block.timestamp` can be nudged** (~12 s class window): deadline
+   boundaries inherit that. Phase durations are ≥ 60 s and the lab runs on
+   automine — acceptable for demonstration, not for high-stakes mainnet use.
+3. **Reveal-order MEV**: within the reveal window, block producers order
+   reveals; the earlier-reveal tie-break can be influenced by them.
+   Commit–reveal delays but cannot eliminate ordering games.
+4. **No asset transfer**: settling pays the seller but delivers nothing —
+   an item/NFT handover (escrowed or atomic swap) is out of scope; "the
+   auction" is purely about allocating ETH claims.
+5. **Trust in the seller**: seller may `cancel()` during the commit phase
+   (bounded: funds are never pushed anywhere and all escrow remains
+   withdrawable — but cancel can be timed to disrupt planning). Seller's key
+   compromise = cancel risk only, never fund theft (I1/I3 hold regardless).
+6. **Winner-keeps-ETH is uncontrolled**: after settlement the winner's payout
+   logic is theirs; nothing the contract can do.
+7. **Client custody**: bid amount + nonce live in `localStorage` (scoped per
+   chain/contract/bidder, never containing private keys — see
+   `src/utils/secrets.ts` + tests). **Losing them = forfeiting the reveal**
+   (and the escrow at settlement, unless no bids were revealed at all).
+   Backup export is provided; clearing browser data is user risk.
+8. **No auth/anti-Sybil**: any address may commit unlimited ETH — the design
+   relies on economics, not identity.
+9. **Single auction per deployment**: deadlines are `immutable`; a new
+   auction needs a new deployment (by design, keeps `address(this)` binding
+   meaningful).
+10. **Not audited externally**; the invariant tests are thorough but written
+    by the same author. Treat all mainnet use as out of scope.
 
-3. **Settlement liveness**: The protocol relies on someone calling `settle()` after the deadline. If no one does, capital remains inefficient but secure. There is no mechanism to force settlement.
+## 7. Client-side security surface
 
-4. **Creator key compromise**: The creator has significant power (can cancel, set parameters). Key compromise leads to potential misuse.
+- **Hash fidelity**: `src/utils/commitment.ts` reproduces the Solidity hash
+  byte-for-byte (`encodePacked` = raw 20-byte addresses, chain-scoped domain
+  tag). Golden vectors were generated from the _deployed contract_ via
+  `cast`; `src/utils/commitment.test.ts` pins them;
+  `src/integration/live.integration.test.ts` re-verifies
+  `frontend hash == computeCommitmentHash()` on a live node (multiple
+  bidders/amounts/nonces, incl. chain/contract scoping sensitivity).
+- **Secret scoping**: localStorage keys include `(chainId, contract, bidder)`
+  (lower-cased); loading cross-checks the stored record against the key and
+  rejects tampered/foreign/mismatched records — switching account or
+  redeploying never leaks an old bid into the wrong reveal
+  (`src/utils/secrets.test.ts`).
+- **No key custody**: in default local mode the browser talks to unlocked
+  Anvil accounts via `eth_sendTransaction` — no private keys or seed phrases
+  ever enter the app or storage. In injected-wallet mode (MetaMask et al.)
+  the **extension** signs; the app requests accounts and verifies the wallet's
+  chain against `VITE_CHAIN_ID`, and refuses to submit while the wallet sits
+  on a different chain (`combineChainOk` fail-closed gating, tested in
+  `src/utils/chainconfig.test.ts`). `generateNonce` uses
+  `crypto.getRandomValues` (test asserts `Math.random` is never consulted
+  for the nonce).
+- **No fake state**: UI renders auction data only from live reads at the
+  `pending` block tag (so the displayed phase can never lag execution and
+  enable an action that would revert); wrong chain / missing code / failed
+  reads disable actions and say so; disabled controls carry the exact gating
+  reason (same rules as contract `require`s, mirrored + tested in
+  `src/utils/gating.test.ts`, browser-confirmed by `npm run
+audit:full-lifecycle`).
 
-5. **No deposit insurance**: If the seller disappears or cancels improperly, deposits are refunded via code but there's no insurance or recourse mechanism.
+## 8. How to verify
 
-6. **Timestamp manipulation**: Block timestamps can be manipulated by validators, though bounded by the consensus protocol.
+```bash
+forge test -vvv               # 44 contract tests
+npm run test:frontend         # 80 unit tests
+npm run test:integration      # 3 live-chain tests (needs npm run dev:local)
+npm run audit:full-lifecycle  # Playwright: whole auction via the UI — commits, per-account
+                              # secret retrieval, reveals, winner, settle, withdrawals,
+                              # double-withdraw refused (UI + on-chain revert), drain-to-0
+npm run audit:responsive      # Playwright: viewports/themes + E2E commit hash cross-check
+npm run verify                # full static battery (fmt/build/tests/lint/build)
+```
 
-#### Mitigations and Design Decisions
+Both browser audits drive real transactions against a fresh local deployment
+and check on-chain state directly; they are the strongest layer of evidence
+this project provides short of an independent external audit (which this
+project has **not** received — see the disclaimer above).
 
-- **Check-effects-interactions pattern**: State is updated before external calls in all functions, mitigating some reentrancy risks.
-- **`nonReentrant` modifier**: Applied to `settle()` to prevent re-entrant calls.
-- **`onlyState` modifiers**: Ensure valid phase transitions only occur under correct conditions.
-- **No admin keys**: All rules are baked into code; no emergent privileges or emergency controls.
-- **Clear invariants**: Eight measurable security invariants are explicitly defined and tested.
+## 9. Reporting issues
 
-#### Recommendations for Users
-
-1. **Reveal promptly**: After committing, reveal your bid as soon as possible to minimize the window for front-running.
-
-2. **Protect your secrets**: Your nonce and bid amount are ephemeral - lose them and lose your bid. Clear browser storage carefully.
-
-3. **Monitor settlement**: After the reveal deadline, monitor the auction to ensure timely settlement.
-
-4. **Use with caution for large amounts**: For significant values, consider additional security measures (multi-sig, time-locks, etc.).
-
-5. **Test before using with real funds**: The contract has been tested with Foundry, but local testing is recommended before mainnet use.
-
-## Audit Status
-
-This code has not been formally audited by external security professionals. The invariants and design decisions are documented here for review by experienced blockchain developers. Independent review is recommended before deploying to production.
+This is a demonstration project; treat findings as lab feedback. For real
+deployments of similar designs, commission an external audit and re-derive
+which invariants survive mainnet assumptions (timestamp tolerance, MEV,
+ERC-20/NFT settlement coupling, gas refunds, etc.).

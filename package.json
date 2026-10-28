@@ -1,41 +1,54 @@
 {
-  "name": "oriel",
+  "name": "blockshield-auction-security-lab",
   "version": "1.0.0",
-  "description": "**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**",
-  "main": "index.js",
+  "description": "BlockShield: a sealed-bid commit-reveal auction security lab \u2014 Foundry contract, responsive React/Vite dApp, live invariant audit on local Anvil.",
   "type": "module",
+  "license": "MIT",
   "scripts": {
     "dev": "vite",
     "dev:local": "bash scripts/dev.sh",
     "build": "vite build",
+    "preview": "vite preview",
     "sync-abi": "bash scripts/sync-abi.sh",
     "sync-abi:check": "bash scripts/sync-abi.sh --check",
     "test": "forge test",
+    "test:frontend": "vitest run",
+    "test:integration": "bash -c 'source .env.local && INTEGRATION_RPC_URL=${VITE_RPC_URL:-http://127.0.0.1:8545} INTEGRATION_CONTRACT=$VITE_CONTRACT_ADDRESS vitest run src/integration'",
+    "audit:responsive": "node scripts/verify-responsive.mjs",
+    "audit:full-lifecycle": "node scripts/audit-full-lifecycle.mjs",
+    "audit:wallet-mode": "node scripts/audit-wallet-mode.mjs",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "tsc --noEmit",
+    "verify": "forge fmt --check && forge build --sizes && forge test && npm run typecheck && npm run lint && npm run format:check && npm run sync-abi:check && npm run test:frontend && npm run build",
+    "verify:live": "bash scripts/rehearse-live.sh"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@tailwindcss/postcss": "^4.3.3",
-    "@types/jest": "^30.0.0",
     "@types/node": "^26.6.5",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
     "autoprefixer": "^10.6.2",
     "eslint": "^10.13.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.2",
+    "globals": "^17.6.0",
+    "playwright": "^1.64.1",
     "postcss": "^8.5.32",
     "prettier": "^3.9.10",
     "tailwindcss": "^4.3.3",
-    "ts-node": "^10.9.2",
-    "vite": "^8.3.5"
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.56.0",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5"
   },
   "dependencies": {
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
-    "viem": "^2.57.12",
-    "wagmi": "^3.7.9"
+    "viem": "^2.57.12"
   }
 }
