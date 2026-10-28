@@ -1,0 +1,41 @@
+{
+  "name": "oriel",
+  "version": "1.0.0",
+  "description": "**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:local": "bash scripts/dev.sh",
+    "build": "vite build",
+    "sync-abi": "bash scripts/sync-abi.sh",
+    "sync-abi:check": "bash scripts/sync-abi.sh --check",
+    "test": "forge test",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "autoprefixer": "^10.6.2",
+    "eslint": "^10.13.0",
+    "postcss": "^8.5.32",
+    "prettier": "^3.9.10",
+    "tailwindcss": "^4.3.3",
+    "ts-node": "^10.9.2",
+    "vite": "^8.3.5"
+  },
+  "dependencies": {
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "viem": "^2.57.12",
+    "wagmi": "^3.7.9"
+  }
+}
